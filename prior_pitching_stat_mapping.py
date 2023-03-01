@@ -153,8 +153,8 @@ def parallel_pitcher_stat_mapping(batter_df, pitch_df, min_innings, maximum_inni
 
     final_df = final_df.dropna().reset_index(drop=True)
 
-    final_df.to_csv('check.csv', index=False)
-    # final_df.to_csv(filename, index=False)
+    # final_df.to_csv('check.csv', index=False)
+    final_df.to_csv(filename, index=False)
 
     return final_df
 
