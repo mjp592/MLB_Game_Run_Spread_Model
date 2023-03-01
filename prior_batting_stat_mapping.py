@@ -71,7 +71,7 @@ def parallel_batter_stat_mapping(df, agg_columns, batter_stat_columns, min_pa, m
 if __name__ == '__main__':
     num_workers = multiprocessing.cpu_count()
 
-    data = pd.read_csv('batter_outcome_and_prior_pitching_batting_stats.csv')
+    data = pd.read_csv('batter_outcome_and_prior_pitching_stats.csv')
     data = data[(data['avg_value?'] == 0)].reset_index(drop=True)
 
     batter_stat_agg_columns = ['out_flag', 'strikeout_flag', 'walk_flag', 'single_flag', 'double_flag', 'triple_flag'
