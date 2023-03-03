@@ -1,4 +1,6 @@
 import pandas as pd
+import joblib
+import numpy as np
 from pybaseball import team_game_logs
 from pybaseball import statcast_single_game
 from statsapi import schedule
@@ -7,6 +9,102 @@ from statsapi import roster
 from pybaseball.lahman import appearances
 import requests
 import json
+
+
+def calculate_sim_pitcher_stats(df, begin_index, last_index, min_innings, date, pitcher):
+    temp_innings = df.loc[begin_index:last_index, 'innings_pitched'].sum()
+
+    if temp_innings >= min_innings:
+        temp_avg_innings = df.loc[begin_index:last_index, 'innings_pitched'].mean()
+        temp_std_innings = df.loc[begin_index:last_index, 'innings_pitched'].std()
+        temp_runs = df.loc[begin_index:last_index, 'runs_scored'].sum()
+        temp_outs = df.loc[begin_index:last_index, 'out_flag'].sum()
+        temp_strikeout = df.loc[begin_index:last_index, 'strikeout_flag'].sum()
+        temp_walks = df.loc[begin_index:last_index, 'walk_flag'].sum()
+        temp_hits = df.loc[begin_index:last_index, 'hits'].sum()
+        temp_batters = df.loc[begin_index:last_index, 'batters_faced'].sum()
+        temp_total_bases = df.loc[begin_index:last_index, 'total_bases'].sum()
+        temp_single = df.loc[begin_index:last_index, 'single_flag'].sum()
+        temp_double = df.loc[begin_index:last_index, 'double_flag'].sum()
+        temp_triple = df.loc[begin_index:last_index, 'triple_flag'].sum()
+        temp_home_run = df.loc[begin_index:last_index, 'home_run_flag'].sum()
+        temp_hbp = df.loc[begin_index:last_index, 'hit_by_pitch_flag'].sum()
+        temp_double_play = df.loc[begin_index:last_index, 'double_play_flag'].sum()
+
+        temp_era = (temp_runs / temp_innings) * 9
+        temp_whip = (temp_hits + temp_walks) / temp_innings
+        temp_tbip = temp_total_bases / temp_innings
+        temp_out_rate = temp_outs / temp_batters
+        temp_k_rate = temp_strikeout / temp_batters
+        temp_w_rate = temp_walks / temp_batters
+        temp_single_rate = temp_single / temp_batters
+        temp_double_rate = temp_double / temp_batters
+        temp_triple_rate = temp_triple / temp_batters
+        temp_hr_rate = temp_home_run / temp_batters
+        temp_hbp_rate = temp_hbp / temp_batters
+        temp_dp_rate = temp_double_play / temp_batters
+
+        cum_prob = temp_out_rate + temp_k_rate + temp_w_rate + temp_single_rate + temp_double_rate + temp_triple_rate + temp_hr_rate + temp_hbp_rate + temp_dp_rate
+
+        temp_out_rate = temp_out_rate / cum_prob
+        temp_k_rate = temp_k_rate / cum_prob
+        temp_w_rate = temp_w_rate / cum_prob
+        temp_single_rate = temp_single_rate / cum_prob
+        temp_double_rate = temp_double_rate / cum_prob
+        temp_triple_rate = temp_triple_rate / cum_prob
+        temp_hr_rate = temp_hr_rate / cum_prob
+        temp_hbp_rate = temp_hbp_rate / cum_prob
+        temp_dp_rate = temp_dp_rate / cum_prob
+
+        temp_row = [date, pitcher, temp_avg_innings, temp_std_innings, temp_era, temp_whip, temp_tbip, temp_k_rate
+                    , temp_w_rate, temp_single_rate, temp_double_rate, temp_triple_rate, temp_hr_rate, temp_hbp_rate
+                    , temp_dp_rate, temp_out_rate, temp_innings]
+
+        return temp_row
+
+    return []
+
+
+def sim_single_pitcher_prior_pitching_stats(df, current_date, pitcher_id, min_innings, maximum_innings):
+    temp_df = df[(df['pitcher'] == pitcher_id)].copy()
+    temp_df = temp_df[(temp_df['game_type'] == 'R')].reset_index(drop=True)
+
+    df = df[(df['game_type'] == 'R')].reset_index(drop=True)
+    df = df[(df['innings_pitched'] > 2)].reset_index(drop=True)
+
+    result = []
+
+    temp_df = temp_df[(temp_df['game_date'] < current_date)]
+
+    num_appearances = temp_df.shape[0]
+    last_index = num_appearances - 1
+
+    for i in range(1, num_appearances):
+
+        begin_index = num_appearances - i
+
+        result = calculate_sim_pitcher_stats(temp_df, begin_index, last_index, min_innings, current_date, pitcher_id)
+
+        if len(result) != 0:
+            if i != last_index:
+
+                if result[16] >= maximum_innings:
+                    result.append(0)
+                    break
+
+            if i == last_index:
+                result.append(0)
+                break
+
+    if len(result) == 0:
+        rows = df.shape[0]
+        end_index = rows - 1
+
+        result = calculate_sim_pitcher_stats(df, 0, end_index, min_innings, current_date, pitcher_id)
+
+        result.append(1)
+
+    return result
 
 
 def get_lineups_for_game(game_id, year):
@@ -54,14 +152,155 @@ def get_lineups_for_game(game_id, year):
     return final_result
 
 
+def calculate_bullpen_stats(team_id, current_date, pitch_df, min_innings, max_innings, column_headers):
+    temp_roster = roster(team_id, date=current_date)
+
+    roster_df = pd.DataFrame([x[3:].strip() for x in temp_roster.split('\n')])
+    second_df = pd.DataFrame([[x[0:2].strip(), x[2:].strip()] for x in roster_df[0]], columns=['Position', 'Name'])
+    second_df = second_df[(second_df['Position'] == 'P')].reset_index(drop=True)
+
+    year = current_date[0:4]
+
+    temp_list = []
+
+    for n in second_df['Name']:
+        pitcher_dict = lookup_player(n, season=year)[0]
+        pitcher_df = pd.DataFrame(pitcher_dict).filter(['id', 'fullName']).reset_index(drop=True)
+        temp_id = pitcher_df.loc[0, 'id']
+        stats = sim_single_pitcher_prior_pitching_stats(pitch_df, current_date, temp_id, min_innings, max_innings)
+        temp_list.append(stats)
+
+    temp_df = pd.DataFrame(temp_list, columns=column_headers)
+
+    second_df = pd.concat([second_df, temp_df], axis=1)
+
+    second_df = second_df[(second_df['Average Innings'] <=2)].reset_index(drop=True)
+    summary = second_df.describe()
+
+    bullpen_stats = summary.loc[['mean', 'std'], :]
+
+    print(second_df)
+    print(bullpen_stats)
+    print(summary)
+    return bullpen_stats
+
+
+def batter_stat_prior_calc(df, temp_batter, current_date, agg_columns, min_pa, max_pa):
+
+    temp_df = df[(df['batter'] == temp_batter)].copy().reset_index(drop=True)
+
+    temp_df = temp_df[(temp_df['game_date'] < current_date)].copy().reset_index(drop=True)
+    temp_rows = temp_df.shape[0]
+    temp_result = [temp_batter]
+
+    for x in agg_columns:
+        if temp_rows > max_pa:
+            temp_value = temp_df.loc[0:max_pa, x].sum() / max_pa
+        elif temp_rows < min_pa:
+            temp_value = df[x].sum() / df.shape[0]
+        else:
+            temp_value = temp_df.loc[0:temp_rows, x].sum() / temp_rows
+
+        temp_result.append(temp_value)
+
+    return temp_result
+
+
+def calculate_lineup_batter_stats(df, lineup, index_date, agg_columns, columns_names, min_pa, max_pa):
+
+    temp_list = []
+
+    for i in lineup['id']:
+        result = batter_stat_prior_calc(df, i, index_date, agg_columns, min_pa, max_pa)
+        temp_list.append(result)
+
+    result_df = pd.DataFrame(temp_list, columns=columns_names)
+    final_df = lineup.merge(result_df, how='left', on='id')
+
+    print(final_df)
+
+    return final_df
+
+
 if __name__ == '__main__':
 
-    games = schedule(start_date='07/01/2018', end_date='07/31/2018')
-    print(appearances())
-    for x in games:
-        temp_game_id = x['game_id']
+    minimum_allowable_innings = 50
+    maximum_allowable_innings = 200
+
+    minimum_allowable_plate_appearances = 200
+    maximum_allowable_plate_appearances = 600
+
+    pitching_df = pd.read_csv('pitcher_appearance_outcomes.csv')
+    plate_appearance_df = pd.read_csv('batter_plate_appearance_outcomes.csv')
+
+    out_model = joblib.load('models/out_logistic_regression_model.joblib')
+    walk_model = joblib.load('models/walk_logistic_regression_model.joblib')
+    strikeout_model = joblib.load('models/strikeout_logistic_regression_model.joblib')
+    single_model = joblib.load('models/single_logistic_regression_model.joblib')
+    double_model = joblib.load('models/double_logistic_regression_model.joblib')
+    triple_model = joblib.load('models/triple_logistic_regression_model.joblib')
+    home_run_model = joblib.load('models/home_run_logistic_regression_model.joblib')
+    double_play_model = joblib.load('models/double_play_logistic_regression_model.joblib')
+    hit_by_pitch_model = joblib.load('models/hit_by_pitch_logistic_regression_model.joblib')
+
+    out_scaler = joblib.load('scalers/out_min_max_scaler.joblib')
+    walk_scaler = joblib.load('scalers/walk_min_max_scaler.joblib')
+    strikeout_scaler = joblib.load('scalers/strikeout_min_max_scaler.joblib')
+    single_scaler = joblib.load('scalers/single_min_max_scaler.joblib')
+    double_scaler = joblib.load('scalers/double_min_max_scaler.joblib')
+    triple_scaler = joblib.load('scalers/triple_min_max_scaler.joblib')
+    home_run_scaler = joblib.load('scalers/home_run_min_max_scaler.joblib')
+    double_play_scaler = joblib.load('scalers/double_play_min_max_scaler.joblib')
+    hit_by_pitch_scaler = joblib.load('scalers/hit_by_pitch_min_max_scaler.joblib')
+
+    batter_stat_agg_columns = ['out_flag', 'strikeout_flag', 'walk_flag', 'single_flag', 'double_flag', 'triple_flag'
+                               , 'home_run_flag', 'double_play_flag', 'hit_by_pitch_flag']
+
+    batter_stat_headers = ['id', 'batter_out_rate', 'batter_strikeout_rate', 'batter_walk_rate'
+                           , 'batter_single_rate', 'batter_double_rate', 'batter_triple_rate', 'batter_home_run_rate'
+                           , 'batter_double_play_rate', 'batter_hit_by_pitch_flag']
+
+    pitching_stat_headers = ['game_date', 'pitcher', 'Average Innings', 'Std Innings', 'era', 'whip', 'tbip'
+                             , 'strikeout_rate', 'walk_rate', 'single_rate', 'double_rate', 'triple_rate'
+                             , 'home_run_rate', 'hit_by_pitch_rate', 'double_play_rate', 'out_rate', 'num_innings'
+                             , 'avg_value?']
+
+    games = schedule(start_date='07/01/2018', end_date='07/01/2018')
+    # print(appearances())
+    for g in games:
+        temp_game_id = g['game_id']
+
         home_lu, away_lu, home_pitcher, away_pitcher, date, home_id, away_id = get_lineups_for_game(temp_game_id, 2018)
-        print(roster(home_id, date=date))
+
+        calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
+                                , maximum_allowable_innings, pitching_stat_headers)
+
+        full_home_lineup = calculate_lineup_batter_stats(plate_appearance_df, home_lu, date, batter_stat_agg_columns
+                                                         , batter_stat_headers, minimum_allowable_plate_appearances
+                                                         , maximum_allowable_plate_appearances)
+
+        full_away_lineup = calculate_lineup_batter_stats(plate_appearance_df, away_lu, date, batter_stat_agg_columns
+                                                         , batter_stat_headers, minimum_allowable_plate_appearances
+                                                         , maximum_allowable_plate_appearances)
+
+        home_pitcher_id = home_pitcher.loc[0, 'id']
+        away_pitcher_id = away_pitcher.loc[0, 'id']
+
+        home_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, home_pitcher_id
+                                                                              , minimum_allowable_innings
+                                                                              , maximum_allowable_innings)
+        home_sp_stat_df = pd.DataFrame([home_starting_pitcher_stats], columns=pitching_stat_headers)
+        home_sp_stat_df = home_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher'], axis=1)
+
+        away_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, away_pitcher_id
+                                                                              , minimum_allowable_innings
+                                                                              , maximum_allowable_innings)
+        away_sp_stat_df = pd.DataFrame([away_starting_pitcher_stats], columns=pitching_stat_headers)
+        away_sp_stat_df = away_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher'], axis=1)
+
+        print(home_sp_stat_df)
+        print(away_sp_stat_df)
+
         time.sleep
 
 
