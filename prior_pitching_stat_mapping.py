@@ -79,7 +79,7 @@ def generate_single_pitcher_prior_pitching_stats(df, date_list, pitcher_id, min_
             if len(result) != 0:
                 if i != last_index:
 
-                    if result[12] >= maximum_innings:
+                    if result[14] >= maximum_innings:
                         result.append(0)
                         temp_list.append(result)
                         break
