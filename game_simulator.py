@@ -1,6 +1,9 @@
+import random
+import matplotlib.pyplot as plt
 import pandas as pd
 import joblib
 import numpy as np
+import scipy as scp
 from pybaseball import team_game_logs
 from pybaseball import statcast_single_game
 from statsapi import schedule
@@ -185,11 +188,11 @@ def calculate_bullpen_stats(team_id, current_date, pitch_df, min_innings, max_in
     return bullpen_stats
 
 
-def batter_stat_prior_calc(df, temp_batter, current_date, agg_columns, min_pa, max_pa):
+def stat_prior_calc(df, temp_batter, current_date, agg_columns, min_pa, max_pa, player_id_label, date_label):
 
-    temp_df = df[(df['batter'] == temp_batter)].copy().reset_index(drop=True)
+    temp_df = df[(df[player_id_label] == temp_batter)].copy().reset_index(drop=True)
 
-    temp_df = temp_df[(temp_df['game_date'] < current_date)].copy().reset_index(drop=True)
+    temp_df = temp_df[(temp_df[date_label] < current_date)].copy().reset_index(drop=True)
     temp_rows = temp_df.shape[0]
     temp_result = [temp_batter]
 
@@ -206,12 +209,13 @@ def batter_stat_prior_calc(df, temp_batter, current_date, agg_columns, min_pa, m
     return temp_result
 
 
-def calculate_lineup_batter_stats(df, lineup, index_date, agg_columns, columns_names, min_pa, max_pa):
+def calculate_lineup_stats(df, lineup, index_date, agg_columns, columns_names
+                           , min_pa, max_pa, player_id_label, date_label):
 
     temp_list = []
 
     for i in lineup['id']:
-        result = batter_stat_prior_calc(df, i, index_date, agg_columns, min_pa, max_pa)
+        result = stat_prior_calc(df, i, index_date, agg_columns, min_pa, max_pa, player_id_label, date_label)
         temp_list.append(result)
 
     result_df = pd.DataFrame(temp_list, columns=columns_names)
@@ -222,6 +226,98 @@ def calculate_lineup_batter_stats(df, lineup, index_date, agg_columns, columns_n
     return final_df
 
 
+def simulate_game(home_batting_stats, away_batting_stats, home_fielding_stats, away_fielding_stats
+                  , home_sp_stats, away_sp_stats, home_bp_stats, away_bp_stats, model_iterable, scalar_iterable):
+
+    home_sp_avg_innings = home_sp_stats.loc[0, 'Average Innings']
+    home_sp_std_innings = home_sp_stats.loc[0, 'Std Innings']
+
+    away_sp_avg_innings = away_sp_stats.loc[0, 'Average Innings']
+    away_sp_std_innings = away_sp_stats.loc[0, 'Std Innings']
+
+    home_bp_avg_innings = home_bp_stats.loc['mean', 'Average Innings']
+    home_bp_std_innings = home_bp_stats.loc['mean', 'Std Innings']
+
+    away_bp_avg_innings = away_bp_stats.loc['mean', 'Average Innings']
+    away_bp_std_innings = away_bp_stats.loc['mean', 'Std Innings']
+
+    home_sp_stats = home_sp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+    away_sp_stats = away_sp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+
+    home_bp_stats = home_bp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+    away_bp_stats = away_bp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+
+    home_error_rate = home_fielding_stats['error_rate'].mean()
+    away_error_rate = away_fielding_stats['error_rate'].mean()
+
+    home_batter_index = 0
+    away_batter_index = 0
+
+    home_score = 0
+    away_score = 0
+
+    inning = 1
+    outs = 0
+    first_base = False
+    second_base = False
+    third_base = False
+
+    home_lineup_regression_inputs = pd.concat([away_sp_stats, home_batting_stats], axis=1).ffill()
+    away_lineup_regression_inputs = pd.concat([home_sp_stats, away_batting_stats], axis=1).ffill()
+
+    current_inputs = away_lineup_regression_inputs.loc[0, :].values.reshape(1, -1)
+
+    temp_outcome = simulate_plate_appearance(current_inputs, model_iterable, scalar_iterable)
+
+    return
+
+
+def generate_plate_appearance_distribution(inputs, models, scalars):
+    raw_results = []
+    length = len(models)
+
+    for i in range(0, length):
+        temp_model = models[i]
+        temp_scalar = scalars[i]
+        temp_data = temp_scalar.transform(inputs)
+        temp_result = temp_model.predict_proba(temp_data)[0][1]
+        raw_results.append(temp_result)
+
+    normalized_results = raw_results / sum(raw_results)
+
+    return normalized_results
+
+
+def simulate_plate_appearance(inputs, models, scalars):
+    distribution = generate_plate_appearance_distribution(inputs, models, scalars)
+
+    outcome_name_list = ['out', 'walk', 'strikeout', 'single', 'double', 'triple', 'home_run', 'double_play', 'hbp']
+    lb = 0
+    hb = 0
+
+    number_possible_outcomes = len(distribution)
+
+    random_sample = random.random()
+
+    for i in range(number_possible_outcomes):
+        temp_prob = distribution[i]
+        if i == 0:
+            hb = hb + temp_prob
+        elif i == (number_possible_outcomes - 1):
+            lb = hb
+            hb = 1
+        else:
+            lb = hb
+            hb = hb + temp_prob
+
+        if lb <= random_sample:
+            if hb > random_sample:
+                result = outcome_name_list[i]
+                break
+
+    return result
+
+
 if __name__ == '__main__':
 
     minimum_allowable_innings = 50
@@ -230,8 +326,13 @@ if __name__ == '__main__':
     minimum_allowable_plate_appearances = 200
     maximum_allowable_plate_appearances = 600
 
+    minimum_allowable_fielding_plays = 50
+    maximum_allowable_fielding_plays = 250
+
     pitching_df = pd.read_csv('pitcher_appearance_outcomes.csv')
     plate_appearance_df = pd.read_csv('batter_plate_appearance_outcomes.csv')
+    fielding_df = pd.read_csv('fielder_play_chance_outcome.csv')
+    fielding_df = fielding_df.sort_values(['game_date'], ascending=False).reset_index(drop=True)
 
     out_model = joblib.load('models/out_logistic_regression_model.joblib')
     walk_model = joblib.load('models/walk_logistic_regression_model.joblib')
@@ -243,6 +344,9 @@ if __name__ == '__main__':
     double_play_model = joblib.load('models/double_play_logistic_regression_model.joblib')
     hit_by_pitch_model = joblib.load('models/hit_by_pitch_logistic_regression_model.joblib')
 
+    model_list = [out_model, walk_model, strikeout_model, single_model, double_model
+                  , triple_model, home_run_model, double_play_model, hit_by_pitch_model]
+
     out_scaler = joblib.load('scalers/out_min_max_scaler.joblib')
     walk_scaler = joblib.load('scalers/walk_min_max_scaler.joblib')
     strikeout_scaler = joblib.load('scalers/strikeout_min_max_scaler.joblib')
@@ -253,17 +357,23 @@ if __name__ == '__main__':
     double_play_scaler = joblib.load('scalers/double_play_min_max_scaler.joblib')
     hit_by_pitch_scaler = joblib.load('scalers/hit_by_pitch_min_max_scaler.joblib')
 
-    batter_stat_agg_columns = ['out_flag', 'strikeout_flag', 'walk_flag', 'single_flag', 'double_flag', 'triple_flag'
-                               , 'home_run_flag', 'double_play_flag', 'hit_by_pitch_flag']
+    scaler_list = [out_scaler, walk_scaler, strikeout_scaler, single_scaler, double_scaler
+                   , triple_scaler, home_run_scaler, double_play_scaler, hit_by_pitch_scaler]
 
-    batter_stat_headers = ['id', 'batter_out_rate', 'batter_strikeout_rate', 'batter_walk_rate'
-                           , 'batter_single_rate', 'batter_double_rate', 'batter_triple_rate', 'batter_home_run_rate'
-                           , 'batter_double_play_rate', 'batter_hit_by_pitch_flag']
+    batter_stat_agg_columns = ['out_flag', 'double_play_flag', 'hit_by_pitch_flag', 'strikeout_flag', 'walk_flag'
+                               , 'single_flag', 'double_flag', 'triple_flag', 'home_run_flag']
+
+    batter_stat_headers = ['id', 'batter_out_rate', 'batter_double_play_rate', 'batter_hit_by_pitch_rate'
+                           , 'batter_strikeout_rate', 'batter_walk_rate', 'batter_single_rate', 'batter_double_rate'
+                           , 'batter_triple_rate', 'batter_home_run_rate']
 
     pitching_stat_headers = ['game_date', 'pitcher', 'Average Innings', 'Std Innings', 'era', 'whip', 'tbip'
                              , 'strikeout_rate', 'walk_rate', 'single_rate', 'double_rate', 'triple_rate'
                              , 'home_run_rate', 'hit_by_pitch_rate', 'double_play_rate', 'out_rate', 'num_innings'
                              , 'avg_value?']
+
+    fielder_stat_agg_columns = ['error_flag']
+    fielder_stat_headers = ['id', 'error_rate']
 
     games = schedule(start_date='07/01/2018', end_date='07/01/2018')
     # print(appearances())
@@ -272,16 +382,23 @@ if __name__ == '__main__':
 
         home_lu, away_lu, home_pitcher, away_pitcher, date, home_id, away_id = get_lineups_for_game(temp_game_id, 2018)
 
-        calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
-                                , maximum_allowable_innings, pitching_stat_headers)
+        home_bullpen_stats = calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
+                                                     , maximum_allowable_innings, pitching_stat_headers)
+        home_bullpen_stats = home_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
 
-        full_home_lineup = calculate_lineup_batter_stats(plate_appearance_df, home_lu, date, batter_stat_agg_columns
-                                                         , batter_stat_headers, minimum_allowable_plate_appearances
-                                                         , maximum_allowable_plate_appearances)
+        away_bullpen_stats = calculate_bullpen_stats(away_id, date, pitching_df, minimum_allowable_innings
+                                                     , maximum_allowable_innings, pitching_stat_headers)
+        away_bullpen_stats = away_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
 
-        full_away_lineup = calculate_lineup_batter_stats(plate_appearance_df, away_lu, date, batter_stat_agg_columns
-                                                         , batter_stat_headers, minimum_allowable_plate_appearances
-                                                         , maximum_allowable_plate_appearances)
+        full_home_lineup_batting = calculate_lineup_stats(plate_appearance_df, home_lu, date, batter_stat_agg_columns
+                                                          , batter_stat_headers, minimum_allowable_plate_appearances
+                                                          , maximum_allowable_plate_appearances, 'batter', 'game_date')
+        full_home_lineup_batting = full_home_lineup_batting.drop(['id', 'fullName'], axis=1)
+
+        full_away_lineup_batting = calculate_lineup_stats(plate_appearance_df, away_lu, date, batter_stat_agg_columns
+                                                          , batter_stat_headers, minimum_allowable_plate_appearances
+                                                          , maximum_allowable_plate_appearances, 'batter', 'game_date')
+        full_away_lineup_batting = full_away_lineup_batting.drop(['id', 'fullName'], axis=1)
 
         home_pitcher_id = home_pitcher.loc[0, 'id']
         away_pitcher_id = away_pitcher.loc[0, 'id']
@@ -290,16 +407,32 @@ if __name__ == '__main__':
                                                                               , minimum_allowable_innings
                                                                               , maximum_allowable_innings)
         home_sp_stat_df = pd.DataFrame([home_starting_pitcher_stats], columns=pitching_stat_headers)
-        home_sp_stat_df = home_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher'], axis=1)
+        home_sp_stat_df = home_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
 
         away_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, away_pitcher_id
                                                                               , minimum_allowable_innings
                                                                               , maximum_allowable_innings)
         away_sp_stat_df = pd.DataFrame([away_starting_pitcher_stats], columns=pitching_stat_headers)
-        away_sp_stat_df = away_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher'], axis=1)
+        away_sp_stat_df = away_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
 
+        full_home_lineup_fielding = calculate_lineup_stats(fielding_df, home_lu, date
+                                                           , fielder_stat_agg_columns, fielder_stat_headers
+                                                           , minimum_allowable_fielding_plays
+                                                           , maximum_allowable_fielding_plays, 'fielder', 'game_date')
+
+        full_away_lineup_fielding = calculate_lineup_stats(fielding_df, away_lu, date
+                                                           , fielder_stat_agg_columns, fielder_stat_headers
+                                                           , minimum_allowable_fielding_plays
+                                                           , maximum_allowable_fielding_plays, 'fielder', 'game_date')
+
+        print(full_home_lineup_batting)
         print(home_sp_stat_df)
-        print(away_sp_stat_df)
+        print(home_bullpen_stats)
+        print(full_home_lineup_fielding)
+
+        simulate_game(full_home_lineup_batting, full_away_lineup_batting, full_home_lineup_fielding
+                      , full_away_lineup_fielding, home_sp_stat_df, away_sp_stat_df, home_bullpen_stats
+                      , away_bullpen_stats, model_list, scaler_list)
 
         time.sleep
 
