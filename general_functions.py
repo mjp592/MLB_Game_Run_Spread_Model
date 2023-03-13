@@ -11,6 +11,26 @@ def one_hot_string_encoding(df, existing_label, matching_string, new_label):
     return df
 
 
+def transform_and_remove_unwanted_events(df, label, remove_iterable, remap_iterable, new_value_iterable):
+
+    if len(remap_iterable) != len(new_value_iterable):
+        print('Each remapping value does not have a direct mapping to a replacement value.')
+        return df
+
+    for k in remove_iterable:
+
+        df = df[(df[label] != k)]
+
+    df = df.reset_index(drop=True)
+
+    for i in range(0, len(remap_iterable)):
+        old_value = remap_iterable[i]
+        new_value = new_value_iterable[i]
+        df.loc[df[label] == old_value, label] = new_value
+
+    return df
+
+
 def k_fold_generation(features, label, k):
 
     if features.shape[0] == label.shape[0]:

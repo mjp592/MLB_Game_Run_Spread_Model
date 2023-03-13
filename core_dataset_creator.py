@@ -2,26 +2,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 from general_functions import one_hot_string_encoding
-
-
-def transform_and_remove_unwanted_events(df, label, remove_iterable, remap_iterable, new_value_iterable):
-
-    if len(remap_iterable) != len(new_value_iterable):
-        print('Each remapping value does not have a direct mapping to a replacement value.')
-        return df
-
-    for k in remove_iterable:
-
-        df = df[(df[label] != k)]
-
-    df = df.reset_index(drop=True)
-
-    for i in range(0, len(remap_iterable)):
-        old_value = remap_iterable[i]
-        new_value = new_value_iterable[i]
-        df.loc[df[label] == old_value, label] = new_value
-
-    return df
+from general_functions import transform_and_remove_unwanted_events
 
 
 def create_all_batter_event_codings(df, existing_label, event_list):
