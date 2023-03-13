@@ -11,13 +11,13 @@ from general_functions import forward_chain_train_logistic_regression_model
 
 
 def calculate_all_logistic_regressions(df, one_hot_label, x_var_labels, y_var_labels, num_of_folds):
-    unique_home_teams = np.unique(df[one_hot_label]).tolist()
+    # unique_home_teams = np.unique(df[one_hot_label]).tolist()
 
-    for t in unique_home_teams:
-        df = one_hot_string_encoding(df, one_hot_label, t, t)
-    print(df)
+    # for t in unique_home_teams:
+    #    df = one_hot_string_encoding(df, one_hot_label, t, t)
+    # print(df)
 
-    x_var_labels = x_var_labels + unique_home_teams
+    # x_var_labels = x_var_labels + unique_home_teams
 
     x_variable_df = df.filter(x_var_labels)
     x_variable_array = x_variable_df.values
