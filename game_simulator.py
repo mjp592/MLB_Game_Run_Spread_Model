@@ -122,12 +122,15 @@ def get_lineups_for_game(game_id, year):
 
     raw_content = result.content
     raw_dict = json.loads(raw_content.decode('utf-8'))
-    first_level_dict = raw_dict['dates'][0]
-    print(list(raw_dict.keys()))
-    print(raw_dict['dates'][0])
-    second_level_dict = first_level_dict['games'][0]
-    print(second_level_dict)
-    third_level_dict = second_level_dict['lineups']
+
+    try:
+        first_level_dict = raw_dict['dates'][0]
+        second_level_dict = first_level_dict['games'][0]
+        third_level_dict = second_level_dict['lineups']
+    except:
+        first_level_dict = raw_dict['dates'][1]
+        second_level_dict = first_level_dict['games'][0]
+        third_level_dict = second_level_dict['lineups']
 
     home_list = third_level_dict['homePlayers']
     away_list = third_level_dict['awayPlayers']
@@ -146,14 +149,15 @@ def get_lineups_for_game(game_id, year):
 
     home_pitcher_dict = lookup_player(home_pitcher_name, season=year)[0]
     away_pitcher_dict = lookup_player(away_pitcher_name, season=year)[0]
-    print(home_pitcher_dict)
+
     home_pitcher_df = pd.DataFrame(home_pitcher_dict).filter(['id', 'fullName']).reset_index(drop=True)
     away_pitcher_df = pd.DataFrame(away_pitcher_dict).filter(['id', 'fullName']).reset_index(drop=True)
 
-    # print(home_lineup)
-    # print(away_lineup)
-    # print(home_pitcher_df)
-    # print(away_pitcher_df)
+    print(home_pitcher_df)
+    print(home_lineup)
+
+    print(away_pitcher_df)
+    print(away_lineup)
 
     final_result = (home_lineup, away_lineup, home_pitcher_df, away_pitcher_df, game_date, home_team_id, away_team_id)
 
@@ -323,6 +327,7 @@ def outcome_translator(outcome, error_chance, score, first, second, third, out, 
                 score = score + 1
             if first == 1:
                 third = 1
+                first = 0
             second = 1
 
     elif outcome == 'home_run':
@@ -465,11 +470,12 @@ def simulate_plate_appearance(inputs, models, scalars):
     return result
 
 
-def calc_team_win_chances(df):
+def calc_team_win_chances(df, line, conditional_header):
     sims = df.shape[0]
 
-    temp_home_df = df.loc[(df['run_spread'] > 0)].copy().reset_index(drop=True)
-    temp_away_df = df.loc[(df['run_spread'] < 0)].copy().reset_index(drop=True)
+    # money line calculations
+    temp_home_df = df.loc[(df[conditional_header] > line)].copy().reset_index(drop=True)
+    temp_away_df = df.loc[(df[conditional_header] < line)].copy().reset_index(drop=True)
 
     home_wins = temp_home_df.shape[0]
     away_wins = temp_away_df.shape[0]
@@ -505,7 +511,7 @@ def calc_money_line_betting_percentage(sim_data, home_team_odds, away_team_odds)
     away_expected_value = (away_team_winning_percentage * away_win_ratio) + ((1 - away_team_winning_percentage) * -1)
 
     result = (home_betting_percentage, away_betting_percentage, home_expected_value, away_expected_value)
-    print(result)
+    # print(result)
 
     return result
 
@@ -584,7 +590,6 @@ def parallel_simulate_game(sim_number):
             temp_outcome = simulate_plate_appearance(current_inputs, model_iterable, scalar_iterable)
 
             away_score, first_base, second_base, third_base, outs, inning, home_away_flag, home_pitcher_out_count = outcome_translator(temp_outcome, home_error_rate, away_score, first_base, second_base, third_base, outs, inning, home_away_flag, home_pitcher_out_count)
-            # insert outcome decoder function here; update outs, base runners, score, pitcher out count and implement fielding errors
 
             if away_batter_index == 8:
                 away_batter_index = 0
@@ -594,7 +599,6 @@ def parallel_simulate_game(sim_number):
             if (home_pitcher_out_count >= home_pitcher_outs_pitched) and home_bp_flag == 0:
                 away_lineup_regression_inputs = pd.concat([home_bp_stats_altered, away_batting_stats], axis=1).ffill()
                 home_bp_flag = 1
-                # generate new regression input df for bullpen
 
         else:
 
@@ -604,7 +608,6 @@ def parallel_simulate_game(sim_number):
             home_score, first_base, second_base, third_base, outs, inning, home_away_flag, away_pitcher_out_count = outcome_translator(
                 temp_outcome, away_error_rate, home_score, first_base, second_base, third_base, outs, inning,
                 home_away_flag, away_pitcher_out_count)
-            # insert outcome decoder function here; update outs, base runners, score, pitcher out count and implement fielding errors
 
             if home_batter_index == 8:
                 home_batter_index = 0
@@ -614,7 +617,6 @@ def parallel_simulate_game(sim_number):
             if (away_pitcher_out_count >= away_pitcher_outs_pitched) and away_bp_flag == 0:
                 home_lineup_regression_inputs = pd.concat([away_bp_stats_altered, home_batting_stats], axis=1).ffill()
                 away_bp_flag = 1
-                # generate new regression input df for bullpen
 
         score_spread = home_score - away_score
 
@@ -674,6 +676,7 @@ if __name__ == '__main__':
 
     num_workers = multiprocessing.cpu_count()
     number_simulations = 5000
+    home_field_advantage = 0.04
 
     today_date = datetime.now()
     current_year = today_date.year
@@ -737,8 +740,17 @@ if __name__ == '__main__':
     # print(appearances())
 
     temp_game_id = input('Enter Game Id for Simulation:')
+    run_line = input('Enter Run line for Simulation (Invert Home Team Run Line):')
+    total_line = input('Enter Total Runs Line for Simulation:')
+
+    run_line = float(run_line)
+    total_line = float(total_line)
 
     home_lu, away_lu, home_pitcher, away_pitcher, date, home_id, away_id = get_lineups_for_game(temp_game_id, current_year)
+
+    # check to see if rockies are playing, if so adjust the home field advantage for them
+    if home_id == 115 or away_id == 115:
+        home_field_advantage = (0.154 / 2)
 
     home_bullpen_stats = calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
                                                      , maximum_allowable_innings, pitching_stat_headers)
@@ -783,15 +795,11 @@ if __name__ == '__main__':
                                                            , minimum_allowable_fielding_plays
                                                            , maximum_allowable_fielding_plays, 'fielder', 'game_date')
 
-    print(full_home_lineup_batting)
     print(home_sp_stat_df)
     print(home_bullpen_stats)
-    print(full_home_lineup_fielding)
 
-    print(full_away_lineup_batting)
     print(away_sp_stat_df)
     print(away_bullpen_stats)
-    print(full_away_lineup_fielding)
 
     sim_headers = ['home_score', 'away_score', 'run_spread']
     pre_time = datetime.now()
@@ -803,11 +811,28 @@ if __name__ == '__main__':
     post_time = datetime.now()
     print(post_time - pre_time)
 
-    win_probs = calc_team_win_chances(agg_df)
-    print(win_probs)
+    agg_df['total_runs'] = agg_df['home_score'] + agg_df['away_score']
+
+    # money line odds calc
+    money_win_probs = calc_team_win_chances(agg_df, 0, 'run_spread')
+    money_win_probs[0] = money_win_probs[0] + home_field_advantage
+    money_win_probs[1] = money_win_probs[1] - home_field_advantage
+    print('MoneyLine (Home, Away)')
+    print(money_win_probs)
+
+    # Run line odds calc
+    run_win_probs = calc_team_win_chances(agg_df, run_line, 'run_spread')
+    print('RunLine (Home, Away)')
+    print(run_win_probs)
+
+    # money line odds calc
+    total_win_probs = calc_team_win_chances(agg_df, total_line, 'total_runs')
+    print('Total Runs (Over, Under)')
+    print(total_win_probs)
+
     # calc_money_line_betting_percentage(agg_df, -120, 100)
 
-    plt.hist(agg_df['run_spread'], bins=20)
+    plt.hist(agg_df['run_spread'], bins=40)
     plt.show()
     # print(agg_df)
 
