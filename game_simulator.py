@@ -2,7 +2,9 @@ import random
 import matplotlib.pyplot as plt
 import pandas as pd
 import joblib
+import multiprocessing
 import numpy as np
+from datetime import datetime
 import scipy as scp
 from pybaseball import team_game_logs
 from pybaseball import statcast_single_game
@@ -121,7 +123,10 @@ def get_lineups_for_game(game_id, year):
     raw_content = result.content
     raw_dict = json.loads(raw_content.decode('utf-8'))
     first_level_dict = raw_dict['dates'][0]
+    print(list(raw_dict.keys()))
+    print(raw_dict['dates'][0])
     second_level_dict = first_level_dict['games'][0]
+    print(second_level_dict)
     third_level_dict = second_level_dict['lineups']
 
     home_list = third_level_dict['homePlayers']
@@ -167,7 +172,10 @@ def calculate_bullpen_stats(team_id, current_date, pitch_df, min_innings, max_in
     temp_list = []
 
     for n in second_df['Name']:
-        pitcher_dict = lookup_player(n, season=year)[0]
+        try:
+            pitcher_dict = lookup_player(n, season=year)[0]
+        except IndexError:
+            continue
         pitcher_df = pd.DataFrame(pitcher_dict).filter(['id', 'fullName']).reset_index(drop=True)
         temp_id = pitcher_df.loc[0, 'id']
         stats = sim_single_pitcher_prior_pitching_stats(pitch_df, current_date, temp_id, min_innings, max_innings)
@@ -177,14 +185,11 @@ def calculate_bullpen_stats(team_id, current_date, pitch_df, min_innings, max_in
 
     second_df = pd.concat([second_df, temp_df], axis=1)
 
-    second_df = second_df[(second_df['Average Innings'] <=2)].reset_index(drop=True)
+    second_df = second_df[(second_df['Average Innings'] <= 2)].reset_index(drop=True)
     summary = second_df.describe()
 
     bullpen_stats = summary.loc[['mean', 'std'], :]
 
-    print(second_df)
-    print(bullpen_stats)
-    print(summary)
     return bullpen_stats
 
 
@@ -221,55 +226,197 @@ def calculate_lineup_stats(df, lineup, index_date, agg_columns, columns_names
     result_df = pd.DataFrame(temp_list, columns=columns_names)
     final_df = lineup.merge(result_df, how='left', on='id')
 
-    print(final_df)
-
     return final_df
 
 
-def simulate_game(home_batting_stats, away_batting_stats, home_fielding_stats, away_fielding_stats
-                  , home_sp_stats, away_sp_stats, home_bp_stats, away_bp_stats, model_iterable, scalar_iterable):
+def outcome_translator(outcome, error_chance, score, first, second, third, out, inning, home_away_flag, out_count):
 
-    home_sp_avg_innings = home_sp_stats.loc[0, 'Average Innings']
-    home_sp_std_innings = home_sp_stats.loc[0, 'Std Innings']
+    random_error_number = random.random()
 
-    away_sp_avg_innings = away_sp_stats.loc[0, 'Average Innings']
-    away_sp_std_innings = away_sp_stats.loc[0, 'Std Innings']
+    if random_error_number <= error_chance:
+        random_error_flag = True
+    else:
+        random_error_flag = False
 
-    home_bp_avg_innings = home_bp_stats.loc['mean', 'Average Innings']
-    home_bp_std_innings = home_bp_stats.loc['mean', 'Std Innings']
+    if outcome == 'out':
 
-    away_bp_avg_innings = away_bp_stats.loc['mean', 'Average Innings']
-    away_bp_std_innings = away_bp_stats.loc['mean', 'Std Innings']
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                third = 1
+                second = 0
+            if first == 1:
+                second = 1
+            first = 1
+        else:
+            out = out + 1
+            out_count = out_count + 1
 
-    home_sp_stats = home_sp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
-    away_sp_stats = away_sp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+    elif outcome == 'strikeout':
 
-    home_bp_stats = home_bp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
-    away_bp_stats = away_bp_stats.drop(['Average Innings', 'Std Innings'], axis=1)
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                third = 1
+                second = 0
+            if first == 1:
+                second = 1
+            first = 1
+        else:
+            out = out + 1
+            out_count = out_count + 1
 
-    home_error_rate = home_fielding_stats['error_rate'].mean()
-    away_error_rate = away_fielding_stats['error_rate'].mean()
+    elif outcome == 'single':
 
-    home_batter_index = 0
-    away_batter_index = 0
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                score = score + 1
+            if first == 1:
+                third = 1
+                first = 0
+            second = 1
+        else:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                third = 1
+                second = 0
+            if first == 1:
+                second = 1
+            first = 1
 
-    home_score = 0
-    away_score = 0
+    elif outcome == 'walk':
 
-    inning = 1
-    outs = 0
-    first_base = False
-    second_base = False
-    third_base = False
+        if (third + second + first) == 3:
+            score = score + 1
+        elif (first + second) == 2:
+            third = 1
+        elif first == 1:
+            second = 1
+        first = 1
 
-    home_lineup_regression_inputs = pd.concat([away_sp_stats, home_batting_stats], axis=1).ffill()
-    away_lineup_regression_inputs = pd.concat([home_sp_stats, away_batting_stats], axis=1).ffill()
+    elif outcome == 'double':
 
-    current_inputs = away_lineup_regression_inputs.loc[0, :].values.reshape(1, -1)
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+            if second == 1:
+                score = score + 1
+                second = 0
+            if first == 1:
+                score = score + 1
+                first = 0
+            third = 1
+        else:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                score = score + 1
+            if first == 1:
+                third = 1
+            second = 1
 
-    temp_outcome = simulate_plate_appearance(current_inputs, model_iterable, scalar_iterable)
+    elif outcome == 'home_run':
 
-    return
+        if third == 1:
+            score = score + 1
+            third = 0
+        if second == 1:
+            score = score + 1
+            second = 0
+        if first == 1:
+            score = score + 1
+            first = 0
+        score = score + 1
+
+    elif outcome == 'double_play':
+
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                third = 1
+                second = 0
+            if first == 1:
+                second = 1
+            first = 1
+        else:
+            out = out + 2
+
+            if (first + second + third) == 3:
+                third = 0
+            elif (third + second + first) == 2:
+                first = 1
+                second = 0
+                third = 0
+            elif (third + second + first) <= 1:
+                first = 0
+                second = 0
+                third = 0
+
+            if out > 3:
+                out_count = out_count + 1
+            else:
+                out_count = out_count + 2
+
+    elif outcome == 'hbp':
+
+        if (third + second + first) == 3:
+            score = score + 1
+        elif (first + second) == 2:
+            third = 1
+        elif first == 1:
+            second = 1
+        first = 1
+
+    else:  # triple outcome
+
+        if random_error_flag:
+            if third == 1:
+                score = score + 1
+                third = 0
+            if second == 1:
+                score = score + 1
+                second = 0
+            if first == 1:
+                score = score + 1
+                first = 0
+            score = score + 1
+        else:
+            if third == 1:
+                score = score + 1
+            if second == 1:
+                score = score + 1
+                second = 0
+            if first == 1:
+                score = score + 1
+                first = 0
+            third = 1
+
+    if out >= 3:
+        inning = inning + 1
+        if home_away_flag == 0:
+            home_away_flag = 1
+        else:
+            home_away_flag = 0
+        out = 0
+        first = 0
+        second = 0
+        third = 0
+
+    result = (score, first, second, third, out, inning, home_away_flag, out_count)
+    # print(result)
+    return result
 
 
 def generate_plate_appearance_distribution(inputs, models, scalars):
@@ -318,7 +465,218 @@ def simulate_plate_appearance(inputs, models, scalars):
     return result
 
 
+def calc_team_win_chances(df):
+    sims = df.shape[0]
+
+    temp_home_df = df.loc[(df['run_spread'] > 0)].copy().reset_index(drop=True)
+    temp_away_df = df.loc[(df['run_spread'] < 0)].copy().reset_index(drop=True)
+
+    home_wins = temp_home_df.shape[0]
+    away_wins = temp_away_df.shape[0]
+
+    home_team_winning_percentage = home_wins / sims
+    away_team_winning_percentage = away_wins / sims
+
+    result = [home_team_winning_percentage, away_team_winning_percentage]
+
+    return result
+
+
+def calc_money_line_betting_percentage(sim_data, home_team_odds, away_team_odds):
+    team_win_chances = calc_team_win_chances(sim_data)
+
+    home_team_winning_percentage = team_win_chances[0]
+    away_team_winning_percentage = team_win_chances[1]
+
+    if home_team_odds > 0:
+        home_win_ratio = home_team_odds / 100
+    else:
+        home_win_ratio = 100 / abs(home_team_odds)
+
+    if away_team_odds > 0:
+        away_win_ratio = away_team_odds / 100
+    else:
+        away_win_ratio = 100 / abs(away_team_odds)
+
+    home_betting_percentage = home_team_winning_percentage - ((1 - home_team_winning_percentage) / home_win_ratio)
+    away_betting_percentage = away_team_winning_percentage - ((1 - away_team_winning_percentage) / away_win_ratio)
+
+    home_expected_value = (home_team_winning_percentage * home_win_ratio) + ((1 - home_team_winning_percentage) * -1)
+    away_expected_value = (away_team_winning_percentage * away_win_ratio) + ((1 - away_team_winning_percentage) * -1)
+
+    result = (home_betting_percentage, away_betting_percentage, home_expected_value, away_expected_value)
+    print(result)
+
+    return result
+
+
+def parallel_simulate_game(sim_number):
+
+    home_sp_avg_innings = home_sp_stats.loc[0, 'Average Innings']
+    home_sp_std_innings = home_sp_stats.loc[0, 'Std Innings']
+
+    away_sp_avg_innings = away_sp_stats.loc[0, 'Average Innings']
+    away_sp_std_innings = away_sp_stats.loc[0, 'Std Innings']
+
+    home_bp_avg_innings = home_bp_stats.loc['mean', 'Average Innings']
+    home_bp_std_innings = home_bp_stats.loc['mean', 'Std Innings']
+
+    away_bp_avg_innings = away_bp_stats.loc['mean', 'Average Innings']
+    away_bp_std_innings = away_bp_stats.loc['mean', 'Std Innings']
+
+    home_sp_stats_altered = home_sp_stats.copy().drop(['Average Innings', 'Std Innings'], axis=1)
+    away_sp_stats_altered = away_sp_stats.copy().drop(['Average Innings', 'Std Innings'], axis=1)
+
+    home_bp_stats_altered = home_bp_stats.copy().drop(['Average Innings', 'Std Innings'], axis=1)
+    home_bp_stats_altered = home_bp_stats_altered.copy().drop(['std'], axis=0).reset_index(drop=True)
+
+    away_bp_stats_altered = away_bp_stats.copy().drop(['Average Innings', 'Std Innings'], axis=1)
+    away_bp_stats_altered = away_bp_stats_altered.copy().drop(['std'], axis=0).reset_index(drop=True)
+
+    home_error_rate = home_fielding_stats['error_rate'].mean()
+    away_error_rate = away_fielding_stats['error_rate'].mean()
+
+    home_batter_index = 0
+    away_batter_index = 0
+
+    home_pitcher_out_count = 0
+    away_pitcher_out_count = 0
+
+    home_bp_flag = 0
+    away_bp_flag = 0
+
+    home_score = 0
+    away_score = 0
+    score_spread = home_score - away_score
+
+    home_away_flag = 0  # 0 equals away lineup is at bat and 1 equals home lineup is at bat
+
+    inning = 1
+    outs = 0
+    first_base = 0  # 0 is no runner and 1 is runner on base
+    second_base = 0  # 0 is no runner and 1 is runner on base
+    third_base = 0  # 0 is no runner and 1 is runner on base
+
+    home_lineup_regression_inputs = pd.concat([away_sp_stats_altered, home_batting_stats], axis=1).ffill()
+    away_lineup_regression_inputs = pd.concat([home_sp_stats_altered, away_batting_stats], axis=1).ffill()
+
+    home_pitcher_innings_pitched = np.random.normal(home_sp_avg_innings, home_sp_std_innings)
+    if home_pitcher_innings_pitched <= 0:
+        home_pitcher_innings_pitched = 1/3
+    elif home_pitcher_innings_pitched > 9:
+        home_pitcher_innings_pitched = 9
+
+    home_pitcher_outs_pitched = int(home_pitcher_innings_pitched * 3)
+
+    away_pitcher_innings_pitched = np.random.normal(away_sp_avg_innings, away_sp_std_innings)
+    if away_pitcher_innings_pitched <= 0:
+        away_pitcher_innings_pitched = 1/3
+    elif away_pitcher_innings_pitched > 9:
+        away_pitcher_innings_pitched = 9
+
+    away_pitcher_outs_pitched = int(away_pitcher_innings_pitched * 3)
+
+    while (inning <= 17) or ((score_spread < 0) and ((inning % 2) == 0) and (inning > 17)) or (score_spread == 0):
+
+        if home_away_flag == 0:
+
+            current_inputs = away_lineup_regression_inputs.loc[away_batter_index, :].values.reshape(1, -1)
+            temp_outcome = simulate_plate_appearance(current_inputs, model_iterable, scalar_iterable)
+
+            away_score, first_base, second_base, third_base, outs, inning, home_away_flag, home_pitcher_out_count = outcome_translator(temp_outcome, home_error_rate, away_score, first_base, second_base, third_base, outs, inning, home_away_flag, home_pitcher_out_count)
+            # insert outcome decoder function here; update outs, base runners, score, pitcher out count and implement fielding errors
+
+            if away_batter_index == 8:
+                away_batter_index = 0
+            else:
+                away_batter_index = away_batter_index + 1
+
+            if (home_pitcher_out_count >= home_pitcher_outs_pitched) and home_bp_flag == 0:
+                away_lineup_regression_inputs = pd.concat([home_bp_stats_altered, away_batting_stats], axis=1).ffill()
+                home_bp_flag = 1
+                # generate new regression input df for bullpen
+
+        else:
+
+            current_inputs = home_lineup_regression_inputs.loc[home_batter_index, :].values.reshape(1, -1)
+            temp_outcome = simulate_plate_appearance(current_inputs, model_iterable, scalar_iterable)
+
+            home_score, first_base, second_base, third_base, outs, inning, home_away_flag, away_pitcher_out_count = outcome_translator(
+                temp_outcome, away_error_rate, home_score, first_base, second_base, third_base, outs, inning,
+                home_away_flag, away_pitcher_out_count)
+            # insert outcome decoder function here; update outs, base runners, score, pitcher out count and implement fielding errors
+
+            if home_batter_index == 8:
+                home_batter_index = 0
+            else:
+                home_batter_index = home_batter_index + 1
+
+            if (away_pitcher_out_count >= away_pitcher_outs_pitched) and away_bp_flag == 0:
+                home_lineup_regression_inputs = pd.concat([away_bp_stats_altered, home_batting_stats], axis=1).ffill()
+                away_bp_flag = 1
+                # generate new regression input df for bullpen
+
+        score_spread = home_score - away_score
+
+    result = [home_score, away_score, score_spread]
+    # print(result)
+    return result
+
+
+def init_game_simulations(home_batting, away_batting, home_fielding, away_fielding
+                                          , home_sp, away_sp, home_bullpen, away_bullpen, models, scalers):
+    global home_batting_stats
+    global away_batting_stats
+    global home_fielding_stats
+    global away_fielding_stats
+    global home_sp_stats
+    global away_sp_stats
+    global home_bp_stats
+    global away_bp_stats
+    global model_iterable
+    global scalar_iterable
+
+    home_batting_stats = home_batting
+    away_batting_stats = away_batting
+    home_fielding_stats = home_fielding
+    away_fielding_stats = away_fielding
+    home_sp_stats = home_sp
+    away_sp_stats = away_sp
+    home_bp_stats = home_bullpen
+    away_bp_stats = away_bullpen
+    model_iterable = models
+    scalar_iterable = scalers
+
+    return
+
+
+def parallel_game_simulations(home_batting, away_batting, home_fielding, away_fielding
+                                          , home_sp, away_sp, home_bullpen, away_bullpen, models, scalers
+                                          , num_of_workers, num_sims, output_headers):
+    temp_list = []
+    i = 0
+
+    with multiprocessing.Pool(processes=num_of_workers, initializer=init_game_simulations
+                              , initargs=(home_batting, away_batting, home_fielding, away_fielding
+                                          , home_sp, away_sp, home_bullpen, away_bullpen, models, scalers)) as pool:
+
+        for result in pool.imap(parallel_simulate_game, range(0, num_sims)):
+
+            i = i + 1
+            temp_list.append(result)
+
+    result_df = pd.DataFrame(temp_list, columns=output_headers)
+
+    return result_df
+
+
 if __name__ == '__main__':
+
+    num_workers = multiprocessing.cpu_count()
+    number_simulations = 5000
+
+    today_date = datetime.now()
+    current_year = today_date.year
 
     minimum_allowable_innings = 50
     maximum_allowable_innings = 200
@@ -375,68 +733,81 @@ if __name__ == '__main__':
     fielder_stat_agg_columns = ['error_flag']
     fielder_stat_headers = ['id', 'error_rate']
 
-    games = schedule(start_date='07/01/2018', end_date='07/01/2018')
+    # games = schedule(start_date='03/30/2023', end_date='03/30/2023')
     # print(appearances())
-    for g in games:
-        temp_game_id = g['game_id']
 
-        home_lu, away_lu, home_pitcher, away_pitcher, date, home_id, away_id = get_lineups_for_game(temp_game_id, 2018)
+    temp_game_id = input('Enter Game Id for Simulation:')
 
-        home_bullpen_stats = calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
+    home_lu, away_lu, home_pitcher, away_pitcher, date, home_id, away_id = get_lineups_for_game(temp_game_id, current_year)
+
+    home_bullpen_stats = calculate_bullpen_stats(home_id, date, pitching_df, minimum_allowable_innings
                                                      , maximum_allowable_innings, pitching_stat_headers)
-        home_bullpen_stats = home_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
+    home_bullpen_stats = home_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
 
-        away_bullpen_stats = calculate_bullpen_stats(away_id, date, pitching_df, minimum_allowable_innings
+    away_bullpen_stats = calculate_bullpen_stats(away_id, date, pitching_df, minimum_allowable_innings
                                                      , maximum_allowable_innings, pitching_stat_headers)
-        away_bullpen_stats = away_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
+    away_bullpen_stats = away_bullpen_stats.drop(['pitcher', 'num_innings', 'avg_value?'], axis=1)
 
-        full_home_lineup_batting = calculate_lineup_stats(plate_appearance_df, home_lu, date, batter_stat_agg_columns
+    full_home_lineup_batting = calculate_lineup_stats(plate_appearance_df, home_lu, date, batter_stat_agg_columns
                                                           , batter_stat_headers, minimum_allowable_plate_appearances
                                                           , maximum_allowable_plate_appearances, 'batter', 'game_date')
-        full_home_lineup_batting = full_home_lineup_batting.drop(['id', 'fullName'], axis=1)
+    full_home_lineup_batting = full_home_lineup_batting.drop(['id', 'fullName'], axis=1)
 
-        full_away_lineup_batting = calculate_lineup_stats(plate_appearance_df, away_lu, date, batter_stat_agg_columns
+    full_away_lineup_batting = calculate_lineup_stats(plate_appearance_df, away_lu, date, batter_stat_agg_columns
                                                           , batter_stat_headers, minimum_allowable_plate_appearances
                                                           , maximum_allowable_plate_appearances, 'batter', 'game_date')
-        full_away_lineup_batting = full_away_lineup_batting.drop(['id', 'fullName'], axis=1)
+    full_away_lineup_batting = full_away_lineup_batting.drop(['id', 'fullName'], axis=1)
 
-        home_pitcher_id = home_pitcher.loc[0, 'id']
-        away_pitcher_id = away_pitcher.loc[0, 'id']
+    home_pitcher_id = home_pitcher.loc[0, 'id']
+    away_pitcher_id = away_pitcher.loc[0, 'id']
 
-        home_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, home_pitcher_id
+    home_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, home_pitcher_id
                                                                               , minimum_allowable_innings
                                                                               , maximum_allowable_innings)
-        home_sp_stat_df = pd.DataFrame([home_starting_pitcher_stats], columns=pitching_stat_headers)
-        home_sp_stat_df = home_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
+    home_sp_stat_df = pd.DataFrame([home_starting_pitcher_stats], columns=pitching_stat_headers)
+    home_sp_stat_df = home_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
 
-        away_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, away_pitcher_id
+    away_starting_pitcher_stats = sim_single_pitcher_prior_pitching_stats(pitching_df, date, away_pitcher_id
                                                                               , minimum_allowable_innings
                                                                               , maximum_allowable_innings)
-        away_sp_stat_df = pd.DataFrame([away_starting_pitcher_stats], columns=pitching_stat_headers)
-        away_sp_stat_df = away_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
+    away_sp_stat_df = pd.DataFrame([away_starting_pitcher_stats], columns=pitching_stat_headers)
+    away_sp_stat_df = away_sp_stat_df.drop(['avg_value?', 'game_date', 'pitcher', 'num_innings'], axis=1)
 
-        full_home_lineup_fielding = calculate_lineup_stats(fielding_df, home_lu, date
+    full_home_lineup_fielding = calculate_lineup_stats(fielding_df, home_lu, date
                                                            , fielder_stat_agg_columns, fielder_stat_headers
                                                            , minimum_allowable_fielding_plays
                                                            , maximum_allowable_fielding_plays, 'fielder', 'game_date')
 
-        full_away_lineup_fielding = calculate_lineup_stats(fielding_df, away_lu, date
+    full_away_lineup_fielding = calculate_lineup_stats(fielding_df, away_lu, date
                                                            , fielder_stat_agg_columns, fielder_stat_headers
                                                            , minimum_allowable_fielding_plays
                                                            , maximum_allowable_fielding_plays, 'fielder', 'game_date')
 
-        print(full_home_lineup_batting)
-        print(home_sp_stat_df)
-        print(home_bullpen_stats)
-        print(full_home_lineup_fielding)
+    print(full_home_lineup_batting)
+    print(home_sp_stat_df)
+    print(home_bullpen_stats)
+    print(full_home_lineup_fielding)
 
-        simulate_game(full_home_lineup_batting, full_away_lineup_batting, full_home_lineup_fielding
-                      , full_away_lineup_fielding, home_sp_stat_df, away_sp_stat_df, home_bullpen_stats
-                      , away_bullpen_stats, model_list, scaler_list)
+    print(full_away_lineup_batting)
+    print(away_sp_stat_df)
+    print(away_bullpen_stats)
+    print(full_away_lineup_fielding)
 
-        time.sleep
+    sim_headers = ['home_score', 'away_score', 'run_spread']
+    pre_time = datetime.now()
 
+    agg_df = parallel_game_simulations(full_home_lineup_batting, full_away_lineup_batting, full_home_lineup_fielding
+                                       , full_away_lineup_fielding, home_sp_stat_df, away_sp_stat_df, home_bullpen_stats
+                                       , away_bullpen_stats, model_list, scaler_list, num_workers, number_simulations
+                                       , sim_headers)
+    post_time = datetime.now()
+    print(post_time - pre_time)
 
+    win_probs = calc_team_win_chances(agg_df)
+    print(win_probs)
+    # calc_money_line_betting_percentage(agg_df, -120, 100)
 
-
+    plt.hist(agg_df['run_spread'], bins=20)
+    plt.show()
+    # print(agg_df)
 
