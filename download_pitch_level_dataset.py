@@ -10,7 +10,7 @@ def download_raw_pitch_data(filename, start_date, end_date, append_flag):
     print(df)
 
     if append_flag == 1:
-        df.to_csv(filename, index=False, mode='a', header=False)
+        df.to_csv(filename, index=False, mode='a', header=False, )
     else:
         df.to_csv(filename, index=False)
 
